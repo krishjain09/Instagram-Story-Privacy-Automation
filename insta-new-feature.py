@@ -1,5 +1,4 @@
 """
-Instagram "Hide Story From" Automation Script 
 ===========================================================================
 Targets the REAL Instagram page as of 2026:
     URL  : https://www.instagram.com/accounts/hide_story_and_live_from/
@@ -23,11 +22,8 @@ from playwright.async_api import (
 STORY_HIDE_URL = "https://www.instagram.com/accounts/hide_story_and_live_from/"
 HEADLESS = False     
 
-SCROLL_STEP_PX   = 600     
-SCROLL_PAUSE_MS  = 1_800   
-MAX_STABLE_TICKS = 3       
-MAX_SCROLL_TICKS = 300     
-MAX_CLICK_RETRY  = 3       
+SCROLL_PAUSE_MS  = 1000    # Time to wait after snapping for DOM elements to load
+MAX_EMPTY_SCROLLS = 6      # Stops execution once the end of the list is reached
 
 # ---------------------------------------------------------------------------
 # BLOKS-ACCURATE SELECTORS
@@ -100,7 +96,6 @@ async def login_via_terminal(page: Page) -> None:
     print("[→] Submitting form...")
     await page.keyboard.press("Enter")
     
-    # --- THE MANUAL OVERRIDE GATE ---
     print("\n" + "╔" + "═" * 58 + "╗")
     print("  ⚠️ ACTION REQUIRED IN THE BROWSER AND TERMINAL")
     print("  1. Go to the browser window.")
@@ -109,69 +104,17 @@ async def login_via_terminal(page: Page) -> None:
     print("  4. Wait until you are fully looking at your Home Feed page.")
     print("╚" + "═" * 58 + "╝")
     
-    # This completely halts the code execution until you press Enter in the terminal!
     await asyncio.to_thread(input, "\n👉 Press [ENTER] here in the terminal ONLY AFTER you are completely logged in: ")
     
     print(f"\n[✓] Resuming script for @{username}...")
     print("[→] Giving the session 3 seconds to fully settle...")
     await page.wait_for_timeout(3000)
 
-    # Clean up common post-login pop-up speedbumps
     for target in ["Not Now", "Cancel"]:
         try:
             await page.locator(f"button:has-text('{target}')").first.click(timeout=2000)
         except PlaywrightTimeout:
             pass
-
-
-# ---------------------------------------------------------------------------
-# SCROLL — lazy-load elements
-# ---------------------------------------------------------------------------
-
-async def scroll_until_stable(page: Page) -> int:
-    print("[→] Scrolling to load all followers …")
-
-    previous = 0
-    stable   = 0
-    ticks    = 0
-
-    while stable < MAX_STABLE_TICKS and ticks < MAX_SCROLL_TICKS:
-        current = await page.locator(ROW_SELECTOR).count()
-
-        if current > previous:
-            print(f"    Found {current} user rows loaded …", end="\r")
-            previous = current
-            stable   = 0
-        else:
-            stable += 1
-
-        await page.evaluate(
-            """(step) => {
-                const selectors = [
-                    'main [style*=\"overflow-y: auto\"]',
-                    'main [style*=\"overflow: auto\"]',
-                    'main [style*=\"overflow-y:auto\"]',
-                    '[role=\"main\"] > div',
-                    'main',
-                ];
-                for (const s of selectors) {
-                    const el = document.querySelector(s);
-                    if (el && el.scrollHeight > el.clientHeight) {
-                        el.scrollTop += step;
-                        return;
-                    }
-                }
-                window.scrollBy(0, step);
-            }""",
-            SCROLL_STEP_PX,
-        )
-
-        await page.wait_for_timeout(SCROLL_PAUSE_MS)
-        ticks += 1
-
-    final = await page.locator(ROW_SELECTOR).count()
-    print(f"\n[✓] Scrolling completed — {final} rows parsed.")
-    return final
 
 
 # ---------------------------------------------------------------------------
@@ -187,68 +130,100 @@ async def is_toggled_on(toggle_el) -> bool:
 
 
 async def click_toggle(page: Page, toggle_el) -> bool:
-    for attempt in range(1, MAX_CLICK_RETRY + 1):
-        try:
-            await toggle_el.scroll_into_view_if_needed()
-            await toggle_el.click(timeout=5000, force=True)
-            return True
-        except Exception as exc:
-            if attempt < MAX_CLICK_RETRY:
-                await page.wait_for_timeout(400 * attempt)
-            else:
-                print(f"\n    [!] Toggle click failed ({exc})")
-                return False
-    return False
+    try:
+        await toggle_el.scroll_into_view_if_needed()
+        await toggle_el.click(timeout=3000, force=True)
+        return True
+    except Exception as exc:
+        print(f"\n    [!] Click failed: {exc}")
+        return False
 
 
 # ---------------------------------------------------------------------------
-# CORE PROCESSOR
+# CORE STREAM PROCESSOR (ELEMENT-SNAPPING HIGH-VIS ENGINE)
 # ---------------------------------------------------------------------------
 
-async def process_all(page: Page, want_on: bool) -> None:
-    total = await scroll_until_stable(page)
+async def stream_process_all(page: Page, want_on: bool) -> None:
+    target_state_label = "Hidden" if want_on else "Visible"
+    action_verb = "Hiding From" if want_on else "Unhiding From"
+    
+    print(f"\n[→] Launching Core Engine: Preparing to mass-set users to {target_state_label}...")
+    print("-" * 65)
 
-    if total == 0:
-        print("\n[✗] 0 valid rows found matching structural components.")
-        return
+    processed_usernames = set()
+    changed = skipped = failed = empty_scroll_ticks = loop_index = 0
 
-    action = "Hiding from" if want_on else "Unhiding from"
-    print(f"\n[→] {action} — processing {total} items …\n")
+    while empty_scroll_ticks < MAX_EMPTY_SCROLLS:
+        current_visible_count = await page.locator(ROW_SELECTOR).count()
+        new_users_found_in_this_pass = False
+        last_row_element = None
 
-    changed = skipped = failed = 0
-
-    for i in range(total):
-        row = page.locator(ROW_SELECTOR).nth(i)
-        toggle = row.locator(TOGGLE_SELECTOR).first
-        
-        try:
-            username = await row.locator('span[data-bloks-name="bk.components.Text"]').first.text_content(timeout=1000)
-            username = username.strip()
-        except Exception:
+        for i in range(current_visible_count):
+            row = page.locator(ROW_SELECTOR).nth(i)
+            last_row_element = row  
+            
             try:
-                username = await row.locator('span').first.text_content(timeout=1000)
-                username = username.strip().split('\n')[0]
-            except Exception:
-                username = f"User_Index_{i}"
+                username = await row.locator('span[data-bloks-name="bk.components.Text"]').first.text_content(timeout=400)
+                username = username.strip()
+            except:
+                try:
+                    username = await row.locator('span').first.text_content(timeout=400)
+                    username = username.strip().split('\n')[0]
+                except:
+                    username = f"User_Index_L{loop_index}_I{i}"
 
-        current = await is_toggled_on(toggle)
+            # Skip over profiles we have already categorized and logged
+            if username in processed_usernames:
+                continue
 
-        if current == want_on:
-            skipped += 1
-        else:
-            print(f"  [→] Updating: {username} ...")
-            ok = await click_toggle(page, toggle)
-            if ok:
-                changed += 1
-                await page.wait_for_timeout(500)  
+            toggle = row.locator(TOGGLE_SELECTOR).first
+            if await toggle.count() == 0:
+                continue
+
+            new_users_found_in_this_pass = True
+            processed_usernames.add(username)
+
+            current_state = await is_toggled_on(toggle)
+            if current_state == want_on:
+                skipped += 1
+                # Scrolling real-time feedback for skipped users
+                print(f"  [✓ Skipped]  @{username:<25} (Already {target_state_label})")
             else:
-                failed += 1
+                # Scrolling real-time feedback for processed actions
+                print(f"  [⚡ Updated]  @{username:<25} (Action: {action_verb})")
+                ok = await click_toggle(page, toggle)
+                if ok:
+                    changed += 1
+                    await page.wait_for_timeout(350)  
+                else:
+                    failed += 1
+                    print(f"  [✗ Failed ]  @{username:<25} (Click Refused)")
 
-    print("\n" + "─" * 52)
-    print(f"  ✓ Total Actions Run : {changed}")
-    print(f"  – Skipped (Correct) : {skipped}")
-    print(f"  ✗ Action Failures   : {failed}")
-    print("─" * 52)
+        if new_users_found_in_this_pass:
+            empty_scroll_ticks = 0  
+        else:
+            empty_scroll_ticks += 1 
+
+        # Snap directly down to the lowest loaded row to render the next block
+        if last_row_element:
+            try:
+                await last_row_element.scroll_into_view_if_needed(timeout=2000)
+            except:
+                pass
+        
+        await page.wait_for_timeout(SCROLL_PAUSE_MS)
+        loop_index += 1
+        
+        # Keep the summary stats constantly tracking seamlessly in the base layer
+        print(f"    >> [Current Session Counters] Total Evaluated: {len(processed_usernames)} | Modified: {changed} | Skipped: {skipped}", end="\r")
+
+    print("\n\n" + "─" * 55)
+    print("  🏁 PLATFORM PIPELINE PROCESSING TERMINATED CLEANLY")
+    print(f"  ✓ Unique Profiles Scanned     : {len(processed_usernames)}")
+    print(f"  ✓ State Switches Executed     : {changed}")
+    print(f"  – Left Untouched (Correct)    : {skipped}")
+    print(f"  ✗ Core Failures/Errors        : {failed}")
+    print("─" * 55)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +232,7 @@ async def process_all(page: Page, want_on: bool) -> None:
 
 async def main() -> None:
     print("=" * 55)
-    print("  Instagram Story Privacy Automation ")
+    print("  Instagram Story Privacy Automation")
     print("=" * 55)
 
     async with async_playwright() as pw:
@@ -279,9 +254,9 @@ async def main() -> None:
             choice = choice.strip().lower()
 
             if choice == "1":
-                await process_all(page, want_on=True)
+                await stream_process_all(page, want_on=True)
             elif choice == "2":
-                await process_all(page, want_on=False)
+                await stream_process_all(page, want_on=False)
             else:
                 print("Exiting script.")
 
