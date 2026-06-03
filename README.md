@@ -66,13 +66,7 @@ Because life is too short for 700 checkbox clicks 💀
 
 Watch the project in action:
 
-👉 **Watch Demo Here**
-
-Replace with your video:
-
-```text
-https://your-demo-link-here
-```
+[![Watch Demo]](https://res.cloudinary.com/dpd1i7viz/video/upload/v1780500463/Instagram-Story-Privacy-Automation_wxa1vx.mp4)
 
 The demo covers:
 

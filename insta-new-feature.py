@@ -257,7 +257,7 @@ async def process_all(page: Page, want_on: bool) -> None:
 
 async def main() -> None:
     print("=" * 55)
-    print("  Instagram Story Privacy Automation  v11 (Manual Gate)")
+    print("  Instagram Story Privacy Automation ")
     print("=" * 55)
 
     async with async_playwright() as pw:
